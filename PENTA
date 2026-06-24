@@ -1,0 +1,97 @@
+import asyncio
+import datetime
+import time
+import aiohttp
+
+# --- CONFIGURATION ---
+TARGET_URL = ""  # Change to your server URL
+TOTAL_REQUESTS = 10000  # Kept small for readable console output
+CONCURRENT_USERS = 100  # How many requests to send at once
+# ---------------------
+
+
+async def send_request(session, request_id, stats):
+    """Sends a single request and prints real-time status details."""
+    start_time = time.time()
+    # Capture the exact time the request is launched
+    launch_time = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+    try:
+        async with session.get(TARGET_URL) as response:
+            duration = time.time() - start_time
+            status = response.status
+
+            # Print details for this specific request immediately
+            print(
+                f"[{launch_time}] Req #{request_id:03d}: Sent -> Status: {status} | Time: {duration*1000:.0f}ms"
+            )
+
+            stats["statuses"][status] = stats["statuses"].get(status, 0) + 1
+            stats["successful"] += 1
+            stats["latencies"].append(duration)
+
+    except Exception as e:
+        duration = time.time() - start_time
+        print(
+            f"[{launch_time}] Req #{request_id:03d}: Sent -> FAILED | Error: {str(e)}"
+        )
+        stats["failed"] += 1
+        stats["errors"].append(str(e))
+
+
+async def worker(session, queue, stats):
+    """Workers pull tasks from the queue to maintain the concurrency level."""
+    while not queue.empty():
+        request_id = await queue.get()
+        await send_request(session, request_id, stats)
+        queue.task_done()
+
+
+async def main():
+    print(f"Starting detailed load test on: {TARGET_URL}")
+    print(f"Tracking {TOTAL_REQUESTS} individual requests...\n")
+    print("-" * 65)
+
+    stats = {
+        "successful": 0,
+        "failed": 0,
+        "statuses": {},
+        "latencies": [],
+        "errors": [],
+    }
+
+    queue = asyncio.Queue()
+    for i in range(1, TOTAL_REQUESTS + 1):
+        await queue.put(i)
+
+    start_time = time.time()
+
+    connector = aiohttp.TCPConnector(limit=CONCURRENT_USERS)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = [
+            asyncio.create_task(worker(session, queue, stats))
+            for _ in range(CONCURRENT_USERS)
+        ]
+        await asyncio.gather(*tasks)
+
+    total_time = time.time() - start_time
+
+    # Print Final Summary
+    print("-" * 65)
+    print("\n" + "=" * 40)
+    print("             FINAL SUMMARY            ")
+    print("=" * 40)
+    print(f"Total Time Taken:  {total_time:.2f} seconds")
+    print(f"Successful Req:    {stats['successful']}")
+    print(f"Failed Req:        {stats['failed']}")
+    print(
+        f"Requests / Sec:    {(stats['successful'] + stats['failed']) / total_time:.2f}"
+    )
+
+    if stats["latencies"]:
+        avg_lat = sum(stats["latencies"]) / len(stats["latencies"])
+        print(f"Avg Response Time: {avg_lat * 1000:.0f} ms")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
